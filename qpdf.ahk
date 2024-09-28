@@ -29,9 +29,10 @@ pdf(fn:="",w:=150,h:=200) {
 	; msgbox str
 		GetFactory("Windows.Data.Pdf.PdfDocument", "{433A0B5F-C007-4788-90F2-08143D922599}", &PdfDocumentStatics:=0)
 		pvGui := Gui("+Resize -DPIScale",fn)
-        pvGui.AddButton(,"Add &PDFs").OnEvent("Click", AddPDF)
+		pvGui.OnEvent("DropFiles",DropPDF)
+        pvGui.AddButton(,"&Add PDFs").OnEvent("Click", AddPDF)
 		pvGui.AddButton("x+5","&Open PDF").OnEvent("Click",(*)=>OpenPdf(fn := FileSelect(1,A_ScriptDir,"Open PDF","PDF (*.pdf)"),0))
-		pvGui.AddButton("x+5","Save &As").OnEvent("Click",pdfSave)
+		pvGui.AddButton("x+5","&Save As").OnEvent("Click",pdfSave)
 		; Create PDF thumbnail ListView
 		MonitorGetWorkArea(1,&Left, &Top, &Right, &Bottom)
 		LV:=pvGui.AddListView("x5 Icon -Hdr LV0x10000 w" (Right-Left)*3//5 " h" Bottom-Top-90,["pdf"])	
@@ -75,6 +76,12 @@ pdf(fn:="",w:=150,h:=200) {
 				OpenPdf(fn)
 	}
 
+	DropPdf(GuiObj, GuiCtrlObj, FileArray, X, Y) {
+	    for i, DroppedFile in FileArray
+    		OpenPdf(DroppedFile)
+	}
+
+	
 	OpenPdf(fn,add:=1) {	; add=1 to add pdf file to the pdf thumbnails ListView
 		static ImgLst
 		if !fn
@@ -138,10 +145,10 @@ pdf(fn:="",w:=150,h:=200) {
 		} 
 
 		; do two renderPdf threads (~5-10% speedup; no obvious gains beyond 2)
-		renderPdf(PdfDocument,0,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,&width:=w,&height:=h)	
+		renderPdf(PdfDocument,0,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,w,h)	
 		Loop PageCount {			; Add and show the images concurrently for the user
 			if A_Index < PageCount	; start rendering next page while waiting for current page to finish 
-				renderPdf(PdfDocument,A_Index,&StreamOut2,&RandomAccessStreamOut2,&AsyncInfo2,&width:=w,&height:=h)
+				renderPdf(PdfDocument,A_Index,&StreamOut2,&RandomAccessStreamOut2,&AsyncInfo2,w,h)
 			if hBmp := AwaitHBitmap(&StreamOut,&RandomAccessStreamOut,&AsyncInfo,w,h) {
 				; Add image to imagelist, and add imagelist item & description to row
 				LV.Add("Icon" IL_Add(ImgLst, "HBITMAP:" hBmp), fn ": " A_Index "/" PageCount)	
@@ -153,7 +160,7 @@ pdf(fn:="",w:=150,h:=200) {
 		pvGui.title := fn " (" PageCount " pages, " A_Tickcount-t "ms)"
 	}
 
-	renderPdf(PdfDocument,Page,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,&imgw,&imgh) {	; Render PDF page with options
+	renderPdf(PdfDocument,Page,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,imgw,imgh) {	; Render PDF page with options
 		ComCall(6, PdfDocument, "uint", Page, "ptr*", &PdfPage:=0)		; page index is 0 based
 		DllCall("ole32\CreateStreamOnHGlobal", "ptr", 0, "uint", true, "ptr*", &StreamOut:=0)
 		DllCall("ShCore\CreateRandomAccessStreamOverStream", "ptr", StreamOut, "uint", BSOS_DEFAULT := 0, "ptr", CLSID, "ptr*", &RandomAccessStreamOut:=0)
@@ -165,8 +172,8 @@ pdf(fn:="",w:=150,h:=200) {
 				imgh := pgh * imgw/pgw
 			else imgw := pgw * imgh/pgh
 		} else imgh:=pgh, imgw:=pgw
-		ComCall(9, PdfPageRenderOptions, "uint", imgw:=round(imgw))	; put_DestinationWidth
-		ComCall(11, PdfPageRenderOptions, "uint", imgh:=round(imgh))	; put_DestinationHeight
+		ComCall(9, PdfPageRenderOptions, "uint", round(imgw))	; put_DestinationWidth
+		ComCall(11, PdfPageRenderOptions, "uint", round(imgh))	; put_DestinationHeight
 		ComCall(7, PdfPage, "ptr", RandomAccessStreamOut, "ptr", PdfPageRenderOptions, "ptr*", &AsyncInfo:=0)	; RenderWithOptionsToStreamAsync
 		; Await(&AsyncInfo)
 		; Dispose(&RandomAccessStreamOut)		; Dispose RandomStream to speedup normal IStream operations later
@@ -318,8 +325,11 @@ pdf(fn:="",w:=150,h:=200) {
 		ComCall(ReadBytes:=14,DataReader,"UInt",numBytesLoaded,"Ptr", buf)
 	}
 
+	initside(lv,row,&pg,&x,&y,&width,&height) {
+	}
+
 	preview(LV,row,selected) {
-		static pgGui, pgPic
+		static pgGui, pgPic, shell
 		if !selected
 			return
 		RegExMatch(title:=LV.GetText(row),"(.+): (\d+)/(\d+)$",&pg)
@@ -329,21 +339,36 @@ pdf(fn:="",w:=150,h:=200) {
 		x+=guiw-20	; place preview to right of main window
 		width := Right-Left-x, height := lvh
 
-		renderPdf(PdfDocs[pg.1][1],pg.2-1,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,&width,&height)
+		renderPdf(PdfDocs[pg.1][1],pg.2-1,&StreamOut,&RandomAccessStreamOut,&AsyncInfo,width,height)
 		hBmp := AwaitHBitmap(&StreamOut,&RandomAccessStreamOut,&AsyncInfo) 
 
 		if !isSet(pgGui) {
-			pgGui:= Gui("+Resize -DPIScale",title)
+			pgGui:= Gui("+Resize -DPIScale",pg[])
 			pgGui.OnEvent("Escape",(*)=>pgGui.Hide())
 			pgGui.OnEvent("Close",(*)=>pgGui.Hide())
 			pgGui.Marginx := pgGui.MarginY := 0
-			pgPic := pgGui.Add("Picture",,"HBITMAP:" hBmp)
+			shell:=pgGui.AddActiveX("Hidden x0 y0 w1 h1","about:blank")	; Place ActiveX shell on top
+			pgPic:=pgGui.Add("Picture","x0 y0","HBITMAP:" hBmp)
+			pgPic.OnEvent("Click",(*)=> shell.Visible:=1)	; If user clicks the preview, then show the ActiveX
 			pgGui.Show("AutoSize NA x" x " y" y)
 		} else {
-			pgGui.Title := title " (" width "x" height ")"
-			pgPic.Value := "*w" width " *h" height " HBITMAP:" hBmp
+			pgGui.Title := pg[]
+			pgPic.Value := "*w0 *h0 HBITMAP:" hBmp
 			pgGui.Show("AutoSize NA")
 		}
+
+		; run shell pdf reader in the background hidden
+		; if preview is clicked then the ActiveX is made visible to allow text selection
+		shell.Visible := 0					
+		sh := shell.value
+		sh.Navigate("about:blank")	
+		While sh.readystate != 4 or sh.busy
+			Sleep 10
+		pgPic.GetPos(,,&imgw,&imgh)	
+		if pg.3 > 1
+			imgw += SysGet(2)				; adjust for scollbar SM_CXVSCROLL
+		ControlMove(,,imgw,imgh,shell.Hwnd)	; adjust size of ActiveX control to fit size of preview bitmap
+		sh.Navigate(pg.1 "#page=" pg.2)	
 	}
 }
 
