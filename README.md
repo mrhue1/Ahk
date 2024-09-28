@@ -1,4 +1,4 @@
-Inspired by the post by iseahound/malcev ( https://www.autohotkey.com/boards/viewtopic.php?style=7&t=80735 ) How to view PDF with Windows API? (PDF -> bitmap) I made a simple GUI front end to re-arrange / remove / insert PDF pages using a combination of Listview, Windows Runtime and QPDF.
+Inspired by the post by iseahound/malcev [How to view PDF with Windows API? (PDF -> bitmap)](https://www.autohotkey.com/boards/viewtopic.php?style=7&t=80735) I made a simple GUI front end to re-arrange / remove / insert PDF pages using a combination of Listview, Windows Runtime and QPDF.
 
 It has the following basics features:
 * Listview icon view with custom sizes to display PDF pages as thumbnails
