@@ -12,3 +12,7 @@ It has the following basics features:
 * Using QPDF via DLLCall
 
 Qpdf is available from its github releases page. I only tested it with https://github.com/qpdf/qpdf/releases/download/v11.9.1/qpdf-11.9.1-msvc64.zip. The qpdf dll was placed in the qpdf\ subfolder.
+
+mpdf.ahk is the updated code that use libmupdf. 
+PDF loading should be twice as fast. Basic rotation and text copying is also included. 
+If you want to build your own libmupdf.dll, you can download it from https://mupdf.com/releases. Build instructions are at https://www.codeproject.com/Articles/1190061/Compiling-MuPDF-DLL-to-Render-and-Edit-PDF-Documen. Basic text copying also added.
