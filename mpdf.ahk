@@ -5,10 +5,10 @@ SetIcon()
 pdf()
 
 pdf(fn:="", thumbw:=150, thumbh:=200) {
-	static pvGui, LV, ctx, PdfDocs := map(), Passwords := map(), Loading:=0, arrows := "▲►▼◄", ImgLst	; PdfDocs to allow preview
+	static pvGui, LV, ctx, PdfDocs := map(), Passwords := map(), Loading:=0, arrows := "▲►▼◄", ImgLst
 	if !isSet(pvGui) {
 		; fz_context *fz_new_context_imp(fz_alloc_context *alloc, fz_locks_context *locks, unsigned int max_store, const char *version);
-		if !ctx := DllCall("libmupdf\fz_new_context_imp","Ptr",0,"Ptr",0,"UInt",0,"AStr","1.25.3","Cdecl Ptr")
+		if !ctx := DllCall("libmupdf\fz_new_context_imp","Ptr",0,"Ptr",0,"UInt",0,"AStr","1.25.4","Cdecl Ptr")
 			throw error("Can't create libmupdf context: Wrong version of dll",-1,"libmupdf.dll")
 		pvGui := Gui("+Resize -DPIScale",fn)
 		pvGui.OnEvent("Close",ExitPdf)
@@ -69,7 +69,7 @@ AboutText := '
 			DllCall("libmupdf\pdf_drop_document","Ptr",ctx,"Ptr",v,"Cdecl")
 		DllCall("libmupdf\fz_drop_context","Ptr",ctx,"Cdecl")
 		pvGui.Destroy()
-		ExitApp
+		ExitApp	; required due to hotkey
 	}
 
 	AddPDF(*) {
@@ -92,11 +92,16 @@ AboutText := '
 	}
 
 	DropPdf(GuiObj, GuiCtrl, FileArray, X, Y) {
-	    for i, DroppedFile in FileArray
-    		OpenPdf(DroppedFile)
+		NumPut("Int", X, "Int", Y, LVHITTESTINFO := Buffer(24,0))
+		SendMessage(0x1012, 0, LVHITTESTINFO, LV.hwnd)	; LVM_HITTEST to find out row being dropped on
+		row := NumGet(LVHITTESTINFO,12,"Int")
+		for i, DroppedFile in FileArray {
+    			row := pdfLoad(DroppedFile,row+1)
+			LV_Refresh(LV)
+		}
 	}
 
-	pdfLoad(fn,add:=1) {	; add=1 to add pdf file to the pdf thumbnails ListView
+	pdfLoad(fn,row:=2147483647) {	; row>=1 to add pdf file to the pdf thumbnails ListView
 		static Pwd
 		if !fn || !FileExist(fn)
 			return
@@ -130,10 +135,10 @@ AboutText := '
 			return
 
 		LV.focus()
-		if !add && IsSet(ImgLst)
+		if !row && IsSet(ImgLst)
 			IL_Destroy(ImgLst), ImgLst := Unset, LV.Delete()
 
-		if !IsSet(ImgLst) {						; Initialize ImageList for listview
+		if !IsSet(ImgLst) {					; Initialize ImageList for listview
 			ImgLst := IL_Create(PageCount,5,1)	; Icon view use large icons
 	; ImageList_SetIconSize sets the dimensions of images in an image list and removes all images from the list.
 			DllCall("ComCtl32.dll\ImageList_SetIconSize","Ptr",ImgLst,"Int",thumbw,"Int",thumbh,"Int")	
@@ -154,10 +159,11 @@ AboutText := '
 			if !Loading		; check if need to abort before we add the image
 				return pvGui.title .= " - Cancelled"
 			; Add and show the images concurrently for the user
-			LV.Add("Icon" IL_Add(ImgLst, "HBITMAP:" hBMP), fn ": " A_Index "/" PageCount " " SubStr(arrows,mod(GetRotate(doc,A_Index)//90,4)+1,1))
+			row:=LV.Insert(row,"Icon" IL_Add(ImgLst, "HBITMAP:" hBMP), fn ": " A_Index "/" PageCount " " SubStr(arrows,mod(GetRotate(doc,A_Index)//90,4)+1,1))+1
 			pvGui.title := fn " loading... (" A_Index "/" PageCount ")"
 		}
 		pvGui.title := fn " (" PageCount " pages, " A_Tickcount-Loading "ms)"
+		return row
 	}
 
 	renderPage(doc,Page,imgw,imgh,iconview:=0,&fz_rect?,&pgw?,&pgh?) {	
@@ -208,18 +214,6 @@ AboutText := '
 		return hBitmap
 	}
 
-	pdfSaveDlg() {
-		while f := FileSelect(16,,"Save As","Documents (*.pdf; *.txt; *.html; *.xml; *.json; *.xhtml)") {
-			if !RegExMatch(f,"\.\w+$")
-				f:=RegExReplace(f,"\.?$", ".pdf")
-			if PdfDocs[f] {
-				msgbox "Cannot save to an opened file.  Please enter a new filename."
-				continue
-			}
-			return f
-		}
-	}
-
 	GetRotate(doc,page,&dict?) {
 		; get page dictionary
 		dict := DllCall("libmupdf\pdf_lookup_page_obj","Ptr",ctx,"Ptr",doc,"Int",page-1,"Cdecl Ptr")	; page is 0 based
@@ -250,173 +244,59 @@ AboutText := '
 	}
 
 	SavePDF(*) {
-		if f := pdfSaveDlg() {
+		fn := RegExReplace(LV.GetText(1),".+\\|: .+")
+		while f := FileSelect(16,fn,"Save As","Document/Image (*.pdf; *.txt; *.html; *.xml; *.json; *.xhtml; *.jpg; *.png; *.svg)") {
+			if !RegExMatch(f,"\.\w+$")
+				f:=RegExReplace(f,"\.?$", ".pdf")
+			if PdfDocs[f] {
+				msgbox "Cannot save to an opened file.  Please enter a new filename."
+				continue
+			}
 			StrPut(f,utf:=Buffer(StrPut(f,"UTF-8")),"UTF-8")	; convert filename to UTF-8 for mupdf
-			txt := ListViewGetContent("Col1",LV.Hwnd)	; Collect list of pages to output
-			if RegExMatch(f,"i)\.\K[a-z]+$",&ext)
-				ext := ext[]
-			if InStr(ext,"pdf") {
-				dst := DllCall("libmupdf\pdf_create_document","Ptr",ctx,"Cdecl Ptr")
-				; pdf_graft_map *pdf_new_graft_map(fz_context *ctx, pdf_document *dst);
-				graft := DllCall("libmupdf\pdf_new_graft_map","Ptr",ctx,"Ptr",dst)
- 				Loop Parse, txt, "`n" {
- 					if RegExMatch(A_LoopField,"(.+): (\d+)/(\d+) (.)$",&pg) {
-	 					page := pg.2-1	; page is 0 based
- 						doc := PdfDocs[pg.1]
-						; pdf_graft_page(fz_context *ctx, pdf_document *dst, int page_to, pdf_document *src, int page_from);
-						; void pdf_graft_mapped_page(fz_context *ctx, pdf_graft_map *map, int page_to, pdf_document *src, int page_from);
-						DllCall("libmupdf\pdf_graft_mapped_page","Ptr",ctx,"Ptr",graft,"int",-1,"Ptr",doc,"int",page,"Cdecl")
-	 				}
- 				}
-				pdf_write_options := buffer(20*4+256,0)
-				Numput("UInt",1,"UInt",1,"UInt",1,"UInt",0,"UInt",4,"UInt",1,pdf_write_options,12)
-;	int do_incremental; /* Write just the changed objects. */
-;	int do_pretty; /* Pretty-print dictionaries and arrays. */
-;	int do_ascii; /* ASCII hex encode binary streams. */
-;	int do_compress; /* Compress streams. */
-;	int do_compress_images; /* Compress (or leave compressed) image streams. */
-;	int do_compress_fonts; /* Compress (or leave compressed) font streams. */
-;	int do_decompress; /* Decompress streams (except when compressing images/fonts). */
-;	int do_garbage; /* Garbage collect objects before saving; 1=gc, 2=re-number, 3=de-duplicate. */
-;	int do_linear; /* Write linearised. */
-;	int do_clean; /* Clean content streams. */
-;	int do_sanitize; /* Sanitize content streams. */
-;	int do_appearance; /* (Re)create appearance streams. */
-;	int do_encrypt; /* Encryption method to use: keep, none, rc4-40, etc. */
-;	int dont_regenerate_id; /* Don't regenerate ID if set (used for clean) */
-;	int permissions; /* Document encryption permissions. */
-;	char opwd_utf8[128]; /* Owner password. */
-;	char upwd_utf8[128]; /* User password. */
-;	int do_snapshot; /* Do not use directly. Use the snapshot functions. */
-;	int do_preserve_metadata; /* When cleaning, preserve metadata unchanged. */
-;	int do_use_objstms; /* Use objstms if possible */
-;	int compression_effort; /* 0 for default. 100 = max, 1 = min. */
-				; pdf_save_document(fz_context *ctx, pdf_document *doc, const char *filename, const pdf_write_options *opts);
-				DllCall("libmupdf\pdf_drop_graft_map","Ptr",ctx,"Ptr",graft,"Cdecl")
-				DllCall("libmupdf\pdf_save_document","Ptr",ctx,"Ptr",dst,"Ptr",utf,"Ptr",pdf_write_options,"Cdecl")
+			ext := RegExReplace(f,".+\.")
+			dst := DllCall("libmupdf\pdf_create_document","Ptr",ctx,"Cdecl Ptr")
+			graft := DllCall("libmupdf\pdf_new_graft_map","Ptr",ctx,"Ptr",dst,"Cdecl Ptr")
+ 			Loop Parse, ListViewGetContent("Col1",LV.Hwnd), "`n"	; Go through list of pages to output
+ 				if RegExMatch(A_LoopField,"(.+): (\d+)/(\d+) (.)$",&pg) 	; page is 0 based
+					DllCall("libmupdf\pdf_graft_mapped_page","Ptr",ctx,"Ptr",graft,"int",-1,"Ptr",PdfDocs[pg.1],"int",pg.2-1,"Cdecl")
+			DllCall("libmupdf\pdf_drop_graft_map","Ptr",ctx,"Ptr",graft,"Cdecl")
+			if ext="pdf" {
+				Numput("Int",1,"Int",1,"Int",1,"Int",0,"Int",4,"Int",1,options := buffer(20*4+256,0),12)
+; int do_incremental; /* Write just the changed objects. */
+; int do_pretty; /* Pretty-print dictionaries and arrays. */
+; int do_ascii; /* ASCII hex encode binary streams. */
+; int do_compress; /* Compress streams. */
+; int do_compress_images; /* Compress (or leave compressed) image streams. */
+; int do_compress_fonts; /* Compress (or leave compressed) font streams. */
+; int do_decompress; /* Decompress streams (except when compressing images/fonts). */
+; int do_garbage; /* Garbage collect objects before saving; 1=gc, 2=re-number, 3=de-duplicate. */
+; int do_linear; /* Write linearised. */
+; int do_clean; /* Clean content streams. */
+; int do_sanitize; /* Sanitize content streams. */
+; int do_appearance; /* (Re)create appearance streams. */
+; int do_encrypt; /* Encryption method to use: keep, none, rc4-40, etc. */
+; int dont_regenerate_id; /* Don't regenerate ID if set (used for clean) */
+; int permissions; /* Document encryption permissions. */
+; char opwd_utf8[128]; /* Owner password. */
+; char upwd_utf8[128]; /* User password. */
+; int do_snapshot; /* Do not use directly. Use the snapshot functions. */
+; int do_preserve_metadata; /* When cleaning, preserve metadata unchanged. */
+; int do_use_objstms; /* Use objstms if possible */
+; int compression_effort; /* 0 for default. 100 = max, 1 = min. */
+				DllCall("libmupdf\pdf_save_document","Ptr",ctx,"Ptr",dst,"Ptr",utf,"Ptr",options,"Cdecl")
 				DllCall("libmupdf\pdf_drop_document","Ptr",ctx,"Ptr",dst,"Cdecl")
-			} else {
-; fz_stext_options : 	int flags;	float scale;
-;	FZ_STEXT_PRESERVE_LIGATURES = 1,
-;	FZ_STEXT_PRESERVE_WHITESPACE = 2,
-;	FZ_STEXT_PRESERVE_IMAGES = 4,
-;	FZ_STEXT_INHIBIT_SPACES = 8,
-;	FZ_STEXT_DEHYPHENATE = 16,
-;	FZ_STEXT_PRESERVE_SPANS = 32,
-;	FZ_STEXT_CLIP = 64,
-;	FZ_STEXT_USE_CID_FOR_UNKNOWN_UNICODE = 128,
-;	FZ_STEXT_COLLECT_STRUCTURE = 256,
-;	FZ_STEXT_ACCURATE_BBOXES = 512,
-;	FZ_STEXT_COLLECT_VECTORS = 1024,
-;	FZ_STEXT_IGNORE_ACTUALTEXT = 2048,
-;	FZ_STEXT_SEGMENT = 4096
-;
-;	FZ_STEXT_PRESERVE_LIGATURES: If this option is activated
-;	ligatures are passed through to the application in their
-;	original form. If this option is deactivated ligatures are
-;	expanded into their constituent parts, e.g. the ligature ffi is
-;	expanded into three separate characters f, f and i.
-;
-;	FZ_STEXT_PRESERVE_WHITESPACE: If this option is activated
-;	whitespace is passed through to the application in its original
-;	form. If this option is deactivated any type of horizontal
-;	whitespace (including horizontal tabs) will be replaced with
-;	space characters of variable width.
-;
-;	FZ_STEXT_PRESERVE_IMAGES: If this option is set, then images
-;	will be stored in the structured text structure. The default is
-;	to ignore all images.
-;
-;	FZ_STEXT_INHIBIT_SPACES: If this option is set, we will not try
-;	to add missing space characters where there are large gaps
-;	between characters.
-;
-;	FZ_STEXT_DEHYPHENATE: If this option is set, hyphens at the
-;	end of a line will be removed and the lines will be merged.
-;
-;	FZ_STEXT_PRESERVE_SPANS: If this option is set, spans on the same line
-;	will not be merged. Each line will thus be a span of text with the same
-;	font, colour, and size.
-;
-;	FZ_STEXT_CLIP: If this option is set, characters that would be entirely
-;	clipped away by the current clipping path (or, more accurate, the smallest
-;	bbox that contains the current clipping path) will be ignored. The
-;	clip path is guaranteed to be smaller then the page mediabox, hence
-;	this option subsumes an older, now deprecated, FZ_STEXT_MEDIABOX_CLIP
-;	option.
-;
-;	FZ_STEXT_COLLECT_STRUCTURE: If this option is set, we will collect
-;	the structure as specified using begin/end_structure calls. This will
-;	change the returned stext structure from being a simple list of blocks
-;	into effectively being a 'tree' that should be walked in depth-first
-;	order.
-;
-;	FZ_STEXT_COLLECT_VECTORS: If this option is set, we will collect
-;	details (currently just the bbox) of vector graphics. This is intended
-;	to be of use in segmentation analysis.
-;
-;	FZ_STEXT_IGNORE_ACTUALTEXT: If this option is set, we will no longer
-;	replace text by the ActualText replacement specified in the document.
-;
-;	FZ_STEXT_SEGMENT: If this option is set, we will attempt to segment
-;	the page into different regions. This will deliberately not do anything
-;	to pages with structure information present.
-;
-; fz_document *fz_new_xhtml_document_from_document(fz_context *ctx, fz_document *old_doc, const fz_stext_options *opts);
-; void fz_drop_document(fz_context *ctx, fz_document *doc);
-; void fz_drop_page(fz_context *ctx, fz_page *page);
-; fz_buffer *fz_new_buffer_from_page_with_format(fz_context *ctx, fz_page *page, const char *format, const char *options, fz_matrix transform, fz_cookie *cookie);
-; fz_stext_page *fz_new_stext_page_from_page_number(fz_context *ctx, fz_document *doc, int number, const fz_stext_options *options);
-; fz_stext_page *fz_new_stext_page(fz_context *ctx, fz_rect mediabox);
-; fz_stext_page *fz_new_stext_page_from_page(fz_context *ctx, fz_page *page, const fz_stext_options *options);
-; fz_device *fz_new_stext_device(fz_context *ctx, fz_stext_page *page, const fz_stext_options *options);
-; void fz_print_stext_page_as_xhtml(fz_context *ctx, fz_output *out, fz_stext_page *page, int id);
-; void fz_print_stext_header_as_xhtml(fz_context *ctx, fz_output *out);
-; void fz_print_stext_trailer_as_xhtml(fz_context *ctx, fz_output *out);
-; void fz_print_stext_page_as_html(fz_context *ctx, fz_output *out, fz_stext_page *page, int id);
-; void fz_print_stext_header_as_html(fz_context *ctx, fz_output *out);
-; void fz_print_stext_trailer_as_html(fz_context *ctx, fz_output *out);
-; void fz_drop_stext_page(fz_context *ctx, fz_stext_page *page);
-; void fz_print_stext_page_as_xml(fz_context *ctx, fz_output *out, fz_stext_page *page, int id);
-; void fz_print_stext_page_as_json(fz_context *ctx, fz_output *out, fz_stext_page *page, float scale);
-; void fz_print_stext_page_as_text(fz_context *ctx, fz_output *out, fz_stext_page *page);
-; fz_output *fz_new_output_with_path(fz_context *, const char *filename, int append);
-; void fz_close_output(fz_context *, fz_output *);
-; void fz_drop_output(fz_context *, fz_output *);
-				fz_stext_options := Buffer(8,0)
-				fz_output := DllCall("libmupdf\fz_new_output_with_path","Ptr",ctx,"Ptr",utf,"int",0,"Cdecl Ptr")
-				if inStr(ext,"htm") {
-					NumPut("Int",4,fz_stext_options)
-					if inStr(ext,"xhtm")
-						DllCall("libmupdf\fz_print_stext_header_as_xhtml","Ptr",ctx,"Ptr",fz_output,"Cdecl")
-					else DllCall("libmupdf\fz_print_stext_header_as_html","Ptr",ctx,"Ptr",fz_output,"Cdecl")
-				}
-				Loop Parse, txt, "`n" {
- 					if RegExMatch(A_LoopField,"(.+): (\d+)/(\d+) (.)$",&pg) {
-						doc := PdfDocs[pg.1]
-						fz_stext_page := DllCall("libmupdf\fz_new_stext_page_from_page_number","Ptr",ctx, "Ptr",doc,"Int",pg.2-1,"Ptr",fz_stext_options,"Cdecl Ptr")
-						if inStr(ext,"xhtm") {
-							DllCall("libmupdf\fz_print_stext_page_as_xhtml","Ptr",ctx, "Ptr",fz_output, "Ptr",fz_stext_page,"int",pg.2,"Cdecl")
-						} else if inStr(ext,"htm") {
-							DllCall("libmupdf\fz_print_stext_page_as_html","Ptr",ctx, "Ptr",fz_output, "Ptr",fz_stext_page,"int",pg.2,"Cdecl")
-						} else if inStr(ext,"xml") {
-							DllCall("libmupdf\fz_print_stext_page_as_xml","Ptr",ctx, "Ptr",fz_output, "Ptr",fz_stext_page,"int",pg.2,"Cdecl")
-						} else if inStr(ext,"json") {
-							DllCall("libmupdf\fz_print_stext_page_as_json","Ptr",ctx, "Ptr",fz_output, "Ptr",fz_stext_page,"float",1,"Cdecl")
-						} else if inStr(ext,"txt") {
-							DllCall("libmupdf\fz_print_stext_page_as_text","Ptr",ctx, "Ptr",fz_output, "Ptr",fz_stext_page,"Cdecl")
-						}
-						DllCall("libmupdf\fz_drop_stext_page","Ptr",ctx, "Ptr",fz_stext_page,"Cdecl")
-					}
-				} 
-				if inStr(ext,"xhtm")
-					DllCall("libmupdf\fz_print_stext_trailer_as_xhtml","Ptr",ctx,"Ptr",fz_output,"Cdecl")
-				else if inStr(ext,"htm")
-					DllCall("libmupdf\fz_print_stext_trailer_as_html","Ptr",ctx,"Ptr",fz_output,"Cdecl")
-				DllCall("libmupdf\fz_close_output","Ptr",ctx,"Ptr",fz_output,"Cdecl")
-				DllCall("libmupdf\fz_drop_output","Ptr",ctx,"Ptr",fz_output,"Cdecl")
+			} else try {
+				if InStr("json,xml", ext)
+					ext := "stext." ext
+				else if ext = "htm"
+					ext := "html"
+				wri := DllCall("libmupdf\fz_new_document_writer","Ptr",ctx,"Ptr",utf,"AStr",ext,"Ptr",0,"Cdecl Ptr")
+				DllCall("libmupdf\fz_write_document","Ptr",ctx,"Ptr",wri,"Ptr",dst,"Cdecl")
+				DllCall("libmupdf\fz_close_document_writer","Ptr",ctx,"Ptr",wri,"Cdecl")
+				DllCall("libmupdf\fz_drop_document_writer","Ptr",ctx,"Ptr",wri,"Cdecl")
 			}
 			msgbox "Done"
+			return
 		}
 	}
 
@@ -460,7 +340,7 @@ AboutText := '
 			pgGui.Title := title
 			pgPic.Value := "*w0 *h0 HBITMAP:" hBmp
 			SetTextRegions()
-			pgGui.Show("AutoSize NA Restore")
+			pgGui.Show("AutoSize NA")
 		}
 
 ;typedef struct
@@ -699,8 +579,7 @@ LV_Right(key) {
 
 LV_Init() {
 	global LV_Clip
-	if !IsSet(LV_Clip)
-		LV_Clip:=[]
+	LV_Clip:=[]
 	pvGui:=GuiFromHwnd(WinExist())
 	return  pvGui["SysListView321"]
 }
@@ -708,11 +587,11 @@ LV_Init() {
 LV_Refresh(LV) {
 	View:=SendMessage(0x108F, 0, 0, LV.Hwnd)
 	if !(View&1){	; If not list/report view
-		LV.Opt("-Redraw")					; Disable redraw to hide that we are switching view
+		LV.Opt("-Redraw 0x2000")				; Disable redraw to hide that we are switching view
 		SendMessage(0x108E, 3, 0, LV.Hwnd)		; Set to list view to order items, LVM_SETVIEW := 0x108E ; (LVM_FIRST + 142)
 		SendMessage(0x108E, View, 0, LV.Hwnd)	; Set back to original view to display items
-		LV.Opt("+Redraw 0x2000")			; Enable redraw with LVS_NOSCROLL
-		LV.Opt("-0x2000")					; Re-enable scrolling after redraw
+		LV.Opt("-0x2000")					; Re-enable scrolling 
+		LV.Opt("+Redraw")					; Enable redraw
    	}
 }
 
@@ -732,13 +611,13 @@ LV_Refresh(LV) {
 			LV_Clip.push(LV_GetIcon(row,LV.Hwnd),LV.GetText(row))
 			LV.Delete(row--)
 		}
-        LV_Refresh(LV)
 		ControlSend("{space}", LV)
+		LV_Refresh(LV)
 	}
 
 ^v::
 	LV_Paste(*) {
-		LV:=LV_Init()
+		LV:=GuiFromHwnd(WinExist())["SysListView321"]
 		row := LV.GetNext(0)
 		Loop LV_Clip.length/2 
 			LV.Insert(row++,"Icon" LV_Clip[A_Index*2-1], LV_Clip[A_Index*2])
@@ -751,8 +630,8 @@ Del::
 		row := 0
 		While row := LV.GetNext(row)
 			LV.Delete(row--)
-		LV_Refresh(LV)
 		ControlSend("{space}", LV)
+		LV_Refresh(LV)
     }
 
 LV_GetIcon(row,Hwnd) {
@@ -877,11 +756,11 @@ LVN_BEGINDRAG(LV, LPARAM) {
 	    if scroll { 
 	; LVM_SCROLL 0x1014
 	; wParam	int that specifies the amount of horizontal scrolling, in pixels, 
-	;			relative to the current position of the list view content. 
-	;			If the list-view control is in list view, this value is 
-	;			rounded up to the nearest number of pixels that form a whole column.
+	;		relative to the current position of the list view content. 
+	;		If the list-view control is in list view, this value is 
+	;		rounded up to the nearest number of pixels that form a whole column.
 	; lParam	int that specifies the amount of vertical scrolling, in pixels, 
-	;			relative to the current position of the list view content.
+	;		relative to the current position of the list view content.
 			SendMessage(0x1014, 0, scroll, LV.Hwnd)	; LVM_SCROLL
 			Sleep(100)	; ScrollDelay
 			ins := -1
@@ -899,7 +778,7 @@ LVN_BEGINDRAG(LV, LPARAM) {
 	;	the LVINSERTMARK structure contains a -1 in the iItem member.
 	;	or if above control (gives closest item if below/left/right of control).
 			SendMessage(0x10A6, 0, LVINSERTMARK, LV.Hwnd)
-    		ins := NumGet(LVINSERTMARK,8,"Int")
+	    		ins := NumGet(LVINSERTMARK,8,"Int")
 	; LVM_SETINSERTMARK 	 0x10A6
 	;	Sets the insertion point to the defined position.
 	;	wParam Must be zero.
@@ -968,7 +847,7 @@ LVN_BEGINDRAG(LV, LPARAM) {
 	; in icon and small icon views, it returns the total number of items.
 	; To scroll a list view control by a specific amount, use the LVM_SCROLL message. 
 	;	SendMessage(0x1029, 0, POINT, Lv.Hwnd)	; LVM_GETORIGIN := 0x1029 ; (LVM_FIRST + 41) 
-	;   x:=x-NumGet(POINT,"Int"), y:=y-NumGet(POINT,4,"Int") 
+	;	x:=x-NumGet(POINT,"Int"), y:=y-NumGet(POINT,4,"Int") 
 	; 	SendMessage(0x1014, x, y, LV.Hwnd)	; LVM_SCROLL
 	; Use LVM_ENSUREVISIBLE to scroll the list view control, if necessary, 
 	; to ensure that a specified item is visible.
@@ -984,18 +863,18 @@ LVN_BEGINDRAG(LV, LPARAM) {
 			SendMessage(0x00001010, ins++, POINT:=Buffer(8), LV.Hwnd)	
 			; Combine view coordinates for LVM_SETITEMPOSITION
 			viewpos:=NumGet(POINT,"Int")+(NumGet(POINT,4,"Int")<<16)	
-	        ; LVM_SETITEMPOSITION = 0x1000+15
+			; LVM_SETITEMPOSITION = 0x1000+15
 			; if moving to front, increment insertion point afterwards; -1 for SET_ITEMPOS (0 based)
 			; if moving to back, decrement selected row so we don't skip past it with LV.GetNext
-	        While row := LV.GetNext(row) 								
-	        	if ins < row
+			While row := LV.GetNext(row) 								
+	        		if ins < row
 					SendMessage(0x100F, Lv_Move(row,ins++)-1, viewpos, LV.Hwnd)	
 				else SendMessage(0x100F, Lv_Move(row--,ins)-1, viewpos, LV.Hwnd)	
 	; LVM_SETITEMPOSITION 0x100F (0x1000+15)
 	; Moves an item to a specified position in a list-view control (must be in icon or small icon view). 
 	; wParam	Index of the list-view item.
 	; lParam	LOWORD specifies the new x-position of the item's upper-left corner, in view coordinates. 
-	;			HIWORD specifies the new y-position of the item's upper-left corner, in view coordinates.
+	;		HIWORD specifies the new y-position of the item's upper-left corner, in view coordinates.
 	; Returns TRUE if successful, or FALSE otherwise.
 	; If the list-view control has the LVS_AUTOARRANGE style, the items in the list-view control 
 	; are arranged after the position of the item is set.
@@ -1004,15 +883,15 @@ LVN_BEGINDRAG(LV, LPARAM) {
 	; View coordinates can be retrieved with LVM_GETITEMPOSITION, and is the 
 	; virtual coordinates within the entire listview (i.e. y can be > screen height)
 			LV.Opt("0x2100")	; switch on LVS_NOSCROLL & LVS_AUTOARRANGE to rearrange items afterwards 
-								; according to item index without changing the scroll position
+							; according to item index without changing the scroll position
 			LV.Opt("-0x2000")	; restore scrolling
 		}
 	}
 	return
 
 	Lv_Move(src,dest) {
-        i:=LV_GetIcon(src,LV.Hwnd)
-   	    t:=LV.GetText(src)
+		i:=LV_GetIcon(src,LV.Hwnd)
+		t:=LV.GetText(src)
 		LV.Delete(src)
 		return LV.Insert(dest,"Icon" i, t)
 	}
@@ -1042,4 +921,3 @@ Base64PNG := '
 	icon := DllCall('CreateIconFromResourceEx', 'Ptr', buf, 'UInt', size, 'UInt', 1, 'UInt', 0x30000, 'Int', width, 'Int', height, 'UInt', 0)
 	TraySetIcon('HICON: ' icon)
 }
-
